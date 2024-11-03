@@ -12,12 +12,11 @@ import lombok.AllArgsConstructor;
 
 import java.time.LocalDateTime;
 
-
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Document(collation = "TicketInfo")
+@Document(collection ="TicketInfo")
 public class Ticket {
     private String id;
 
