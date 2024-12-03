@@ -9,92 +9,136 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class TicketPoolServiceImpl implements TicketPoolService {
     private final TicketRepository ticketRepository;
-    private BlockingQueue<Ticket> ticketPool;
-    private Configuration config;
-    private volatile boolean isRunning = false;
+    private final Map<String, BlockingQueue<Ticket>> ticketPools = new ConcurrentHashMap<>();
+    private final Map<String, Configuration> configs = new ConcurrentHashMap<>();
+    private final Map<String, AtomicBoolean> runningStatus = new ConcurrentHashMap<>();
 
     @Override
-    public void initialize(Configuration config) {
-        this.config = config;
-        this.ticketPool = new LinkedBlockingQueue<>(config.getMaxTicketCapacity());
-        this.isRunning = true;
-        log.info("Initialized ticket pool with capacity: {}", config.getMaxTicketCapacity());
-    }
+    public synchronized void addTickets(String eventId, int count) {
+        AtomicBoolean isRunning = runningStatus.get(eventId);
+        if (isRunning == null || !isRunning.get()) {
+            throw new IllegalStateException("Ticket pool is not running for event: " + eventId);
+        }
 
-    @Override
-    public synchronized void addTickets(int count) {
-        if (!isRunning) {
-            throw new IllegalStateException("Ticket pool is not running");
+        BlockingQueue<Ticket> ticketPool = ticketPools.get(eventId);
+        Configuration config = configs.get(eventId);
+
+        if (ticketPool == null || config == null) {
+            throw new IllegalStateException("Ticket pool not initialized for event: " + eventId);
         }
 
         if (ticketPool.size() + count > config.getMaxTicketCapacity()) {
-            log.warn("Cannot add {} tickets, pool at capacity", count);
+            log.warn("Cannot add {} tickets for event {}, pool at capacity", count, eventId);
             return;
         }
 
-        for (int i = 0; i < count; i++) {
+        for (int i = 0; i < count && isRunning.get(); i++) {
             Ticket ticket = Ticket.builder()
+                    .eventId(eventId)
                     .status(Ticket.TicketStatus.AVAILABLE)
                     .createdAt(LocalDateTime.now())
                     .build();
 
             try {
-                ticketPool.put(ticket);
+                if (!ticketPool.offer(ticket, 100, TimeUnit.MILLISECONDS)) {
+                    log.debug("Skipping ticket addition due to timeout");
+                    break;
+                }
                 ticketRepository.save(ticket);
-                log.debug("Added ticket to pool. Current size: {}", ticketPool.size());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.error("Interrupted while adding tickets", e);
+                log.debug("Interrupted while adding tickets for event: {}", eventId);
                 break;
             }
         }
     }
 
     @Override
-    public Ticket purchaseTicket(String customerId) {
-        if (!isRunning) {
-            throw new IllegalStateException("Ticket pool is not running");
+    public Ticket purchaseTicket(String eventId, String customerId) {
+        AtomicBoolean isRunning = runningStatus.get(eventId);
+        if (isRunning == null || !isRunning.get()) {
+            throw new IllegalStateException("Ticket pool is not running for event: " + eventId);
+        }
+
+        BlockingQueue<Ticket> ticketPool = ticketPools.get(eventId);
+        if (ticketPool == null) {
+            throw new IllegalStateException("Ticket pool not initialized for event: " + eventId);
         }
 
         try {
-            Ticket ticket = ticketPool.take();
+            Ticket ticket = ticketPool.poll(100, TimeUnit.MILLISECONDS);
+            if (ticket == null) {
+                return null; // No ticket available
+            }
+
             ticket.setStatus(Ticket.TicketStatus.PURCHASED);
             ticket.setPurchasedAt(LocalDateTime.now());
             ticket.setPurchasedBy(customerId);
             ticketRepository.save(ticket);
 
-            log.info("Ticket purchased by customer {}. Remaining: {}",
-                    customerId, ticketPool.size());
+            log.info("Ticket purchased by customer {} for event {}. Remaining: {}",
+                    customerId, eventId, ticketPool.size());
             return ticket;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.error("Interrupted while purchasing ticket", e);
-            throw new RuntimeException("Failed to purchase ticket", e);
+            log.debug("Interrupted while purchasing ticket for event: {}", eventId);
+            return null;
         }
     }
 
     @Override
-    public int getAvailableTicketCount() {
-        return ticketPool.size();
+    public void initialize(String eventId, Configuration config) {
+        ticketPools.put(eventId, new LinkedBlockingQueue<>(config.getMaxTicketCapacity()));
+        configs.put(eventId, config);
+        runningStatus.put(eventId, new AtomicBoolean(true));
+        log.info("Initialized ticket pool for event {} with capacity: {}",
+                eventId, config.getMaxTicketCapacity());
     }
 
     @Override
-    public boolean isPoolFull() {
+    public int getAvailableTicketCount(String eventId) {
+        BlockingQueue<Ticket> ticketPool = ticketPools.get(eventId);
+        return ticketPool != null ? ticketPool.size() : 0;
+    }
+
+    @Override
+    public boolean isPoolFull(String eventId) {
+        BlockingQueue<Ticket> ticketPool = ticketPools.get(eventId);
+        Configuration config = configs.get(eventId);
+
+        if (ticketPool == null || config == null) {
+            return false;
+        }
+
         return ticketPool.size() >= config.getMaxTicketCapacity();
     }
 
     @Override
-    public void shutdown() {
-        isRunning = false;
-        ticketPool.clear();
-        log.info("Ticket pool shutdown");
+    public void shutdown(String eventId) {
+        AtomicBoolean status = runningStatus.get(eventId);
+        if (status != null) {
+            status.set(false);
+        }
+
+        BlockingQueue<Ticket> ticketPool = ticketPools.remove(eventId);
+        configs.remove(eventId);
+        runningStatus.remove(eventId);
+
+        if (ticketPool != null) {
+            ticketPool.clear();
+            log.info("Ticket pool shutdown for event: {}", eventId);
+        }
     }
 }

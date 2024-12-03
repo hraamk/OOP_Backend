@@ -15,13 +15,12 @@ import org.springframework.data.mongodb.core.mapping.Document;
 public class Configuration {
     @Id
     private String id;
-    private int totalTickets;
-    private int ticketReleaseRate;  // tickets per minute
-    private int customerRetrievalRate;  // attempts per minute
-    private int maxTicketCapacity;
+    private String eventId;  // Reference to associated event
     private int vendorCount;
     private int customerCount;
-    private boolean isRunning;
-
+    private int ticketReleaseRate;
+    private int customerRetrievalRate;
+    private int maxTicketCapacity;
+    private boolean running;
+    private boolean paused;
 }
-
