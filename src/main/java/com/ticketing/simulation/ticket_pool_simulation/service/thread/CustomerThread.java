@@ -9,28 +9,45 @@ import lombok.extern.slf4j.Slf4j;
 @RequiredArgsConstructor
 public class CustomerThread implements Runnable {
     private final TicketPoolService ticketPoolService;
+    private final String eventId;
     private final String customerId;
-    private final long purchaseInterval;
+    private final long sleepTime;
     private volatile boolean running = true;
+    private volatile boolean paused = false;
+
+    public void stop() {
+        running = false;
+    }
+
+    public void pause() {
+        paused = true;
+    }
+
+    public void resume() {
+        paused = false;
+    }
 
     @Override
     public void run() {
         while (running) {
             try {
-                Ticket ticket = ticketPoolService.purchaseTicket(customerId);
-                log.info("Customer {} purchased ticket {}", customerId, ticket.getId());
-                Thread.sleep(purchaseInterval);
+                if (!paused) {
+                    Ticket ticket = ticketPoolService.purchaseTicket(eventId, customerId);
+                    if (ticket == null) {
+                        // No ticket available or interrupted, wait before retrying
+                        Thread.sleep(sleepTime);
+                        continue;
+                    }
+                }
+                Thread.sleep(sleepTime);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.warn("Customer thread interrupted");
                 break;
             } catch (Exception e) {
-                log.error("Error purchasing ticket", e);
+                log.error("Error in customer thread: {}", e.getMessage());
+                break;
             }
         }
-    }
-
-    public void stop() {
-        running = false;
+        log.info("Customer thread {} stopped", customerId);
     }
 }
