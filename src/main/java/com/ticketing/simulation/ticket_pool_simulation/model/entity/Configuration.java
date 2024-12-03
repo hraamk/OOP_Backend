@@ -22,4 +22,6 @@ public class Configuration {
     private int vendorCount;
     private int customerCount;
     private boolean isRunning;
+
 }
+
