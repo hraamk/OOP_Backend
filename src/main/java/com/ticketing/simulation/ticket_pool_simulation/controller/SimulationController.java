@@ -20,99 +20,95 @@ public class SimulationController {
     private final SimulationService simulationService;
 
     @PostMapping("/{eventId}/start")
-    public ResponseEntity<?> startSimulation(@PathVariable String eventId,
-                                             @RequestBody Configuration config) {
+    public ResponseEntity<SimulationStatus> startSimulation(@PathVariable String eventId,
+                                                            @RequestBody Configuration config) {
         try {
-            Configuration currentConfig = simulationService.getSimulationStatus(eventId);
+            Configuration currentConfig = simulationService.getConfiguration(eventId);
             if (currentConfig != null && currentConfig.isRunning()) {
                 return ResponseEntity.badRequest()
-                        .body("Simulation for event " + eventId + " is already running. Please stop it first.");
+                        .body(simulationService.getSimulationStatus(eventId));
             }
 
             simulationService.startSimulation(eventId, config);
-            return ResponseEntity.ok("Simulation started successfully for event: " + eventId);
+            return ResponseEntity.ok(simulationService.getSimulationStatus(eventId));
         } catch (Exception e) {
             log.error("Error starting simulation for event: {}", eventId, e);
             return ResponseEntity.internalServerError()
-                    .body("Failed to start simulation: " + e.getMessage());
+                    .body(new SimulationStatus(false, 0, 0, 0));
         }
     }
 
     @PostMapping("/{eventId}/stop")
-    public ResponseEntity<?> stopSimulation(@PathVariable String eventId) {
+    public ResponseEntity<SimulationStatus> stopSimulation(@PathVariable String eventId) {
         try {
-            Configuration currentConfig = simulationService.getSimulationStatus(eventId);
-            if (currentConfig == null || !currentConfig.isRunning()) {
+            Configuration config = simulationService.getConfiguration(eventId);
+            if (config == null || !config.isRunning()) {
                 return ResponseEntity.badRequest()
-                        .body("No simulation is currently running for event: " + eventId);
+                        .body(new SimulationStatus(false, 0, 0, 0));
             }
 
             simulationService.stopSimulation(eventId);
-            return ResponseEntity.ok("Simulation stopped successfully for event: " + eventId);
+            return ResponseEntity.ok(new SimulationStatus(false, 0, 0, 0));
         } catch (Exception e) {
             log.error("Error stopping simulation for event: {}", eventId, e);
             return ResponseEntity.internalServerError()
-                    .body("Failed to stop simulation: " + e.getMessage());
+                    .body(new SimulationStatus(false, 0, 0, 0));
         }
     }
 
     @PostMapping("/{eventId}/pause")
-    public ResponseEntity<?> pauseSimulation(@PathVariable String eventId) {
+    public ResponseEntity<SimulationStatus> pauseSimulation(@PathVariable String eventId) {
         try {
-            Configuration currentConfig = simulationService.getSimulationStatus(eventId);
+            Configuration currentConfig = simulationService.getConfiguration(eventId);
             if (currentConfig == null || !currentConfig.isRunning()) {
                 return ResponseEntity.badRequest()
-                        .body("No simulation is currently running for event: " + eventId);
+                        .body(new SimulationStatus(false, 0, 0, 0));
             }
 
             simulationService.pauseSimulation(eventId);
-            return ResponseEntity.ok("Simulation paused successfully for event: " + eventId);
+            return ResponseEntity.ok(simulationService.getSimulationStatus(eventId));
         } catch (Exception e) {
             log.error("Error pausing simulation for event: {}", eventId, e);
             return ResponseEntity.internalServerError()
-                    .body("Failed to pause simulation: " + e.getMessage());
+                    .body(new SimulationStatus(false, 0, 0, 0));
         }
     }
 
     @PostMapping("/{eventId}/resume")
-    public ResponseEntity<?> resumeSimulation(@PathVariable String eventId) {
+    public ResponseEntity<SimulationStatus> resumeSimulation(@PathVariable String eventId) {
         try {
-            Configuration currentConfig = simulationService.getSimulationStatus(eventId);
+            Configuration currentConfig = simulationService.getConfiguration(eventId);
             if (currentConfig == null) {
                 return ResponseEntity.badRequest()
-                        .body("No simulation exists for event: " + eventId);
+                        .body(new SimulationStatus(false, 0, 0, 0));
             }
 
             if (!currentConfig.isPaused()) {
                 return ResponseEntity.badRequest()
-                        .body("Simulation for event " + eventId + " is not paused");
+                        .body(simulationService.getSimulationStatus(eventId));
             }
 
             simulationService.resumeSimulation(eventId);
-            return ResponseEntity.ok("Simulation resumed successfully for event: " + eventId);
+            return ResponseEntity.ok(simulationService.getSimulationStatus(eventId));
         } catch (Exception e) {
             log.error("Error resuming simulation for event: {}", eventId, e);
             return ResponseEntity.internalServerError()
-                    .body("Failed to resume simulation: " + e.getMessage());
+                    .body(new SimulationStatus(false, 0, 0, 0));
         }
     }
 
     @GetMapping("/{eventId}/status")
-    public ResponseEntity<?> getSimulationStatus(@PathVariable String eventId) {
+    public ResponseEntity<SimulationStatus> getStatus(@PathVariable String eventId) {
         try {
-            Configuration currentConfig = simulationService.getSimulationStatus(eventId);
-            if (currentConfig == null) {
-                return ResponseEntity.ok()
-                        .body(new SimulationStatus(false, 0, 0, 0));
-            }
-
-            return ResponseEntity.ok(currentConfig);
+            SimulationStatus status = simulationService.getSimulationStatus(eventId);
+            return ResponseEntity.ok(status);
         } catch (Exception e) {
-            log.error("Error fetching simulation status for event: {}", eventId, e);
+            log.error("Error getting simulation status for event: {}", eventId, e);
             return ResponseEntity.internalServerError()
-                    .body("Failed to fetch simulation status: " + e.getMessage());
+                    .body(new SimulationStatus(false, 0, 0, 0));
         }
     }
+
 
     @GetMapping("/all")
     public ResponseEntity<?> getAllSimulations() {

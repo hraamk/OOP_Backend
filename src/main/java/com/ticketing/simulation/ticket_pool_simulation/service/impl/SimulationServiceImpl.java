@@ -1,5 +1,6 @@
 package com.ticketing.simulation.ticket_pool_simulation.service.impl;
 
+import com.ticketing.simulation.ticket_pool_simulation.model.dto.SimulationStatus;
 import com.ticketing.simulation.ticket_pool_simulation.model.entity.Configuration;
 import com.ticketing.simulation.ticket_pool_simulation.model.entity.Event;
 import com.ticketing.simulation.ticket_pool_simulation.repository.ConfigurationRepository;
@@ -42,7 +43,7 @@ public class SimulationServiceImpl implements SimulationService {
     }
 
     @Override
-    public void startSimulation(String eventId, Configuration config) {
+    public SimulationStatus startSimulation(String eventId, Configuration config) {
         if (activeSimulations.containsKey(eventId)) {
             throw new IllegalStateException("Simulation for event " + eventId + " is already running");
         }
@@ -94,6 +95,13 @@ public class SimulationServiceImpl implements SimulationService {
 
         log.info("Started simulation for event {} with {} vendors and {} customers",
                 eventId, config.getVendorCount(), config.getCustomerCount());
+
+        return new SimulationStatus(
+                true,
+                config.getVendorCount(),
+                config.getCustomerCount(),
+                runningThreads.size()
+        );
     }
 
     @Override
@@ -112,9 +120,10 @@ public class SimulationServiceImpl implements SimulationService {
         ticketPoolService.shutdown(eventId);
 
         // Update configuration
-        context.getConfig().setRunning(false);
-        context.getConfig().setPaused(false);
-        configRepository.save(context.getConfig());
+        Configuration config = context.getConfig();
+        config.setRunning(false);
+        config.setPaused(false);
+        configRepository.save(config);
 
         // Remove from active simulations
         activeSimulations.remove(eventId);
@@ -169,13 +178,14 @@ public class SimulationServiceImpl implements SimulationService {
     }
 
     @Override
-    public Configuration getSimulationStatus(String eventId) {
+    public Configuration getConfiguration(String eventId) {
         SimulationContext context = activeSimulations.get(eventId);
         if (context == null) {
             return configRepository.findByEventId(eventId).orElse(null);
         }
         return context.getConfig();
     }
+
 
     @Override
     public List<Configuration> getAllSimulations() {
@@ -196,5 +206,24 @@ public class SimulationServiceImpl implements SimulationService {
         }
         activeSimulations.clear();
         log.info("Cleaned up all simulations");
+    }
+
+    @Override
+    public SimulationStatus getSimulationStatus(String eventId) {
+        SimulationContext context = activeSimulations.get(eventId);
+        Configuration config = context != null ?
+                context.getConfig() :
+                configRepository.findByEventId(eventId).orElse(null);
+
+        if (config == null) {
+            return new SimulationStatus(false, 0, 0, 0);
+        }
+
+        return new SimulationStatus(
+                config.isRunning(),
+                config.getVendorCount(),
+                config.getCustomerCount(),
+                context != null ? context.getRunningThreads().size() : 0
+        );
     }
 }
