@@ -128,4 +128,83 @@ public class SimulationController {
                     .body("Failed to fetch simulations: " + e.getMessage());
         }
     }
+    @PostMapping("/{eventId}/vendors/increase")
+    public ResponseEntity<SimulationStatus> increaseVendorCount(
+            @PathVariable String eventId,
+            @RequestParam(defaultValue = "1") int count) {
+        try {
+            Configuration config = simulationService.getConfiguration(eventId);
+            if (config == null || !config.isRunning()) {
+                return ResponseEntity.badRequest()
+                        .body(new SimulationStatus(false, 0, 0, 0));
+            }
+
+            SimulationStatus status = simulationService.increaseVendorCount(eventId, count);
+            return ResponseEntity.ok(status);
+        } catch (Exception e) {
+            log.error("Error increasing vendor count for event: {}", eventId, e);
+            return ResponseEntity.internalServerError()
+                    .body(new SimulationStatus(false, 0, 0, 0));
+        }
+    }
+
+    @PostMapping("/{eventId}/vendors/decrease")
+    public ResponseEntity<SimulationStatus> decreaseVendorCount(
+            @PathVariable String eventId,
+            @RequestParam(defaultValue = "1") int count) {
+        try {
+            Configuration config = simulationService.getConfiguration(eventId);
+            if (config == null || !config.isRunning()) {
+                return ResponseEntity.badRequest()
+                        .body(new SimulationStatus(false, 0, 0, 0));
+            }
+
+            SimulationStatus status = simulationService.decreaseVendorCount(eventId, count);
+            return ResponseEntity.ok(status);
+        } catch (Exception e) {
+            log.error("Error decreasing vendor count for event: {}", eventId, e);
+            return ResponseEntity.internalServerError()
+                    .body(new SimulationStatus(false, 0, 0, 0));
+        }
+    }
+
+    @PostMapping("/{eventId}/customers/increase")
+    public ResponseEntity<SimulationStatus> increaseCustomerCount(
+            @PathVariable String eventId,
+            @RequestParam(defaultValue = "1") int count) {
+        try {
+            Configuration config = simulationService.getConfiguration(eventId);
+            if (config == null || !config.isRunning()) {
+                return ResponseEntity.badRequest()
+                        .body(new SimulationStatus(false, 0, 0, 0));
+            }
+
+            SimulationStatus status = simulationService.increaseCustomerCount(eventId, count);
+            return ResponseEntity.ok(status);
+        } catch (Exception e) {
+            log.error("Error increasing customer count for event: {}", eventId, e);
+            return ResponseEntity.internalServerError()
+                    .body(new SimulationStatus(false, 0, 0, 0));
+        }
+    }
+
+    @PostMapping("/{eventId}/customers/decrease")
+    public ResponseEntity<SimulationStatus> decreaseCustomerCount(
+            @PathVariable String eventId,
+            @RequestParam(defaultValue = "1") int count) {
+        try {
+            Configuration config = simulationService.getConfiguration(eventId);
+            if (config == null || !config.isRunning()) {
+                return ResponseEntity.badRequest()
+                        .body(new SimulationStatus(false, 0, 0, 0));
+            }
+
+            SimulationStatus status = simulationService.decreaseCustomerCount(eventId, count);
+            return ResponseEntity.ok(status);
+        } catch (Exception e) {
+            log.error("Error decreasing customer count for event: {}", eventId, e);
+            return ResponseEntity.internalServerError()
+                    .body(new SimulationStatus(false, 0, 0, 0));
+        }
+    }
 }

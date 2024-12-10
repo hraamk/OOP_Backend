@@ -296,4 +296,177 @@ public class SimulationServiceImpl implements SimulationService {
             log.error("Error during cleanup for event {}: {}", eventId, e.getMessage());
         }
     }
+    @Override
+    public SimulationStatus increaseVendorCount(String eventId, int count) {
+        SimulationContext context = activeSimulations.get(eventId);
+        if (context == null) {
+            throw new IllegalStateException("No simulation running for event: " + eventId);
+        }
+
+        Configuration config = context.getConfig();
+        List<VendorThread> newVendors = new ArrayList<>();
+        List<Thread> newThreads = new ArrayList<>();
+
+        // Create new vendor threads
+        for (int i = 0; i < count; i++) {
+            try {
+                VendorThread vendorThread = new VendorThread(
+                        ticketPoolService,
+                        eventId,
+                        config.getTicketReleaseRate(),
+                        60000L / config.getTicketReleaseRate()
+                );
+                newVendors.add(vendorThread);
+                Thread thread = new Thread(vendorThread,
+                        "Vendor-" + eventId + "-" + (config.getVendorCount() + i));
+                newThreads.add(thread);
+                thread.start();
+
+                if (context.isPaused()) {
+                    vendorThread.pause();
+                }
+            } catch (Exception e) {
+                log.error("Error creating new vendor thread: {}", e.getMessage());
+            }
+        }
+
+        // Update configuration and context
+        config.setVendorCount(config.getVendorCount() + newVendors.size());
+        configRepository.save(config);
+
+        context.getVendorThreads().addAll(newVendors);
+        context.getRunningThreads().addAll(newThreads);
+
+        return getSimulationStatus(eventId);
+    }
+
+    @Override
+    public SimulationStatus decreaseVendorCount(String eventId, int count) {
+        SimulationContext context = activeSimulations.get(eventId);
+        if (context == null) {
+            throw new IllegalStateException("No simulation running for event: " + eventId);
+        }
+
+        Configuration config = context.getConfig();
+        if (config.getVendorCount() <= count) {
+            count = config.getVendorCount() - 1; // Keep at least one vendor
+        }
+
+        if (count <= 0) {
+            return getSimulationStatus(eventId);
+        }
+
+        // Remove the specified number of vendor threads
+        List<VendorThread> vendorsToRemove = context.getVendorThreads()
+                .subList(context.getVendorThreads().size() - count, context.getVendorThreads().size());
+        List<Thread> threadsToRemove = new ArrayList<>();
+
+        // Find and stop the corresponding threads
+        for (VendorThread vendor : vendorsToRemove) {
+            vendor.stop();
+            context.getRunningThreads().stream()
+                    .filter(thread -> thread.getName().contains("Vendor") &&
+                            thread.getName().endsWith(vendor.toString()))
+                    .findFirst()
+                    .ifPresent(thread -> {
+                        thread.interrupt();
+                        threadsToRemove.add(thread);
+                    });
+        }
+
+        // Update lists and configuration
+        context.getVendorThreads().removeAll(vendorsToRemove);
+        context.getRunningThreads().removeAll(threadsToRemove);
+        config.setVendorCount(config.getVendorCount() - count);
+        configRepository.save(config);
+
+        return getSimulationStatus(eventId);
+    }
+    @Override
+    public SimulationStatus increaseCustomerCount(String eventId, int count) {
+        SimulationContext context = activeSimulations.get(eventId);
+        if (context == null) {
+            throw new IllegalStateException("No simulation running for event: " + eventId);
+        }
+
+        Configuration config = context.getConfig();
+        List<CustomerThread> newCustomers = new ArrayList<>();
+        List<Thread> newThreads = new ArrayList<>();
+
+        // Create new customer threads
+        for (int i = 0; i < count; i++) {
+            try {
+                CustomerThread customerThread = new CustomerThread(
+                        ticketPoolService,
+                        eventId,
+                        "Customer-" + (config.getCustomerCount() + i),
+                        60000L / config.getCustomerRetrievalRate()
+                );
+                newCustomers.add(customerThread);
+                Thread thread = new Thread(customerThread,
+                        "Customer-" + eventId + "-" + (config.getCustomerCount() + i));
+                newThreads.add(thread);
+                thread.start();
+
+                if (context.isPaused()) {
+                    customerThread.pause();
+                }
+            } catch (Exception e) {
+                log.error("Error creating new customer thread: {}", e.getMessage());
+            }
+        }
+
+        // Update configuration and context
+        config.setCustomerCount(config.getCustomerCount() + newCustomers.size());
+        configRepository.save(config);
+
+        context.getCustomerThreads().addAll(newCustomers);
+        context.getRunningThreads().addAll(newThreads);
+
+        return getSimulationStatus(eventId);
+    }
+    @Override
+    public SimulationStatus decreaseCustomerCount(String eventId, int count) {
+        SimulationContext context = activeSimulations.get(eventId);
+        if (context == null) {
+            throw new IllegalStateException("No simulation running for event: " + eventId);
+        }
+
+        Configuration config = context.getConfig();
+        if (config.getCustomerCount() <= count) {
+            count = config.getCustomerCount() - 1; // Keep at least one customer
+        }
+
+        if (count <= 0) {
+            return getSimulationStatus(eventId);
+        }
+
+        // Remove the specified number of customer threads
+        List<CustomerThread> customersToRemove = context.getCustomerThreads()
+                .subList(context.getCustomerThreads().size() - count, context.getCustomerThreads().size());
+        List<Thread> threadsToRemove = new ArrayList<>();
+
+        // Find and stop the corresponding threads
+        for (CustomerThread customer : customersToRemove) {
+            customer.stop();
+            context.getRunningThreads().stream()
+                    .filter(thread -> thread.getName().contains("Customer") &&
+                            thread.getName().endsWith(customer.toString()))
+                    .findFirst()
+                    .ifPresent(thread -> {
+                        thread.interrupt();
+                        threadsToRemove.add(thread);
+                    });
+        }
+
+        // Update lists and configuration
+        context.getCustomerThreads().removeAll(customersToRemove);
+        context.getRunningThreads().removeAll(threadsToRemove);
+        config.setCustomerCount(config.getCustomerCount() - count);
+        configRepository.save(config);
+
+        return getSimulationStatus(eventId);
+    }
+
+
 }

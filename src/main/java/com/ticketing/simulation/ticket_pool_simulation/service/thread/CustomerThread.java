@@ -14,6 +14,7 @@ public class CustomerThread implements Runnable {
     private final long sleepTime;
     private volatile boolean running = true;
     private volatile boolean paused = false;
+    private static final int MAX_RETRIES = 3;
 
     public void stop() {
         running = false;
@@ -30,13 +31,32 @@ public class CustomerThread implements Runnable {
     @Override
     public void run() {
         while (running) {
+            if (Thread.interrupted()) {
+                break;
+            }
+
             try {
                 if (!paused) {
-                    Ticket ticket = ticketPoolService.purchaseTicket(eventId, customerId);
-                    if (ticket == null) {
-                        // No ticket available or interrupted, wait before retrying
-                        Thread.sleep(sleepTime);
-                        continue;
+                    int retries = 0;
+                    boolean success = false;
+
+                    while (!success && retries < MAX_RETRIES && running && !paused) {
+                        try {
+                            Ticket ticket = ticketPoolService.purchaseTicket(eventId, customerId);
+                            if (ticket == null) {
+                                // No ticket available, break retry loop
+                                break;
+                            }
+                            success = true;
+                        } catch (Exception e) {
+                            retries++;
+                            if (retries >= MAX_RETRIES) {
+                                log.error("Failed to purchase ticket after {} retries for customer: {}",
+                                        MAX_RETRIES, customerId);
+                                break;
+                            }
+                            Thread.sleep(100 * retries); // Exponential backoff
+                        }
                     }
                 }
                 Thread.sleep(sleepTime);
@@ -44,10 +64,11 @@ public class CustomerThread implements Runnable {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                log.error("Error in customer thread: {}", e.getMessage());
-                break;
+                log.error("Error in customer thread {}: {}", customerId, e.getMessage());
+                // Continue running but log the error
             }
         }
         log.info("Customer thread {} stopped", customerId);
     }
+
 }

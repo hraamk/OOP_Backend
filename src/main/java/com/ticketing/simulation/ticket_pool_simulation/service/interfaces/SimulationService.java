@@ -5,7 +5,7 @@ import com.ticketing.simulation.ticket_pool_simulation.model.entity.Configuratio
 import java.util.List;
 
 public interface SimulationService {
-    SimulationStatus startSimulation(String eventId, Configuration config);  // Changed return type to SimulationStatus
+    SimulationStatus startSimulation(String eventId, Configuration config);
     void stopSimulation(String eventId);
     void pauseSimulation(String eventId);
     void resumeSimulation(String eventId);
@@ -13,4 +13,10 @@ public interface SimulationService {
     SimulationStatus getSimulationStatus(String eventId);
     List<Configuration> getAllSimulations();
     void cleanupSimulations();
+
+    // New methods for managing vendor and customer counts
+    SimulationStatus increaseVendorCount(String eventId, int count);
+    SimulationStatus decreaseVendorCount(String eventId, int count);
+    SimulationStatus increaseCustomerCount(String eventId, int count);
+    SimulationStatus decreaseCustomerCount(String eventId, int count);
 }
