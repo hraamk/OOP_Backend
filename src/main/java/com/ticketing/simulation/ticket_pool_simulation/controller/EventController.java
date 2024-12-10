@@ -12,7 +12,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/events")
-@CrossOrigin(origins = "*")
+//@CrossOrigin(origins = "*")
 @Slf4j
 @RequiredArgsConstructor
 public class EventController {

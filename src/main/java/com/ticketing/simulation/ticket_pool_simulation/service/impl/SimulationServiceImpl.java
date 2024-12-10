@@ -44,64 +44,101 @@ public class SimulationServiceImpl implements SimulationService {
 
     @Override
     public SimulationStatus startSimulation(String eventId, Configuration config) {
-        if (activeSimulations.containsKey(eventId)) {
-            throw new IllegalStateException("Simulation for event " + eventId + " is already running");
-        }
+        try {
+            log.info("Starting simulation for event: {}", eventId);
 
-        Event event = eventRepository.findById(eventId)
-                .orElseThrow(() -> new ResourceNotFoundException("Event not found: " + eventId));
+            // Check if simulation already exists
+            if (activeSimulations.containsKey(eventId)) {
+                log.warn("Simulation already exists for event: {}", eventId);
+                return getSimulationStatus(eventId);
+            }
 
-        config.setEventId(eventId);
-        config.setRunning(true);
-        config.setPaused(false);
-        configRepository.save(config);
+            // Validate event existence
+            Event event = eventRepository.findById(eventId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Event not found: " + eventId));
 
-        List<VendorThread> vendorThreads = new ArrayList<>();
-        List<CustomerThread> customerThreads = new ArrayList<>();
-        List<Thread> runningThreads = new ArrayList<>();
+            // Initialize configuration
+            config.setEventId(eventId);
+            config.setRunning(true);
+            config.setPaused(false);
 
-        ticketPoolService.initialize(eventId, config);
+            // Save configuration
+            try {
+                config = configRepository.save(config);
+            } catch (Exception e) {
+                log.error("Error saving configuration: {}", e.getMessage());
+                throw new RuntimeException("Failed to save configuration", e);
+            }
 
-        // Start vendor threads
-        for (int i = 0; i < config.getVendorCount(); i++) {
-            VendorThread vendorThread = new VendorThread(
-                    ticketPoolService,
-                    eventId,
-                    config.getTicketReleaseRate(),
-                    60000L / config.getTicketReleaseRate()
+            // Initialize ticket pool
+            try {
+                ticketPoolService.initialize(eventId, config);
+            } catch (Exception e) {
+                log.error("Error initializing ticket pool: {}", e.getMessage());
+                throw new RuntimeException("Failed to initialize ticket pool", e);
+            }
+
+            List<VendorThread> vendorThreads = new ArrayList<>();
+            List<CustomerThread> customerThreads = new ArrayList<>();
+            List<Thread> runningThreads = new ArrayList<>();
+
+            // Start vendor threads
+            for (int i = 0; i < config.getVendorCount(); i++) {
+                try {
+                    VendorThread vendorThread = new VendorThread(
+                            ticketPoolService,
+                            eventId,
+                            config.getTicketReleaseRate(),
+                            60000L / config.getTicketReleaseRate()
+                    );
+                    vendorThreads.add(vendorThread);
+                    Thread thread = new Thread(vendorThread, "Vendor-" + eventId + "-" + i);
+                    runningThreads.add(thread);
+                    thread.start();
+                } catch (Exception e) {
+                    log.error("Error starting vendor thread {}: {}", i, e.getMessage());
+                }
+            }
+
+            // Start customer threads
+            for (int i = 0; i < config.getCustomerCount(); i++) {
+                try {
+                    CustomerThread customerThread = new CustomerThread(
+                            ticketPoolService,
+                            eventId,
+                            "Customer-" + i,
+                            60000L / config.getCustomerRetrievalRate()
+                    );
+                    customerThreads.add(customerThread);
+                    Thread thread = new Thread(customerThread, "Customer-" + eventId + "-" + i);
+                    runningThreads.add(thread);
+                    thread.start();
+                } catch (Exception e) {
+                    log.error("Error starting customer thread {}: {}", i, e.getMessage());
+                }
+            }
+
+            // Store simulation context
+            SimulationContext context = new SimulationContext(
+                    config, vendorThreads, customerThreads, runningThreads, false
             );
-            vendorThreads.add(vendorThread);
-            Thread thread = new Thread(vendorThread, "Vendor-" + eventId + "-" + i);
-            runningThreads.add(thread);
-            thread.start();
-        }
+            activeSimulations.put(eventId, context);
 
-        // Start customer threads
-        for (int i = 0; i < config.getCustomerCount(); i++) {
-            CustomerThread customerThread = new CustomerThread(
-                    ticketPoolService,
-                    eventId,
-                    "Customer-" + i,
-                    60000L / config.getCustomerRetrievalRate()
+            log.info("Successfully started simulation for event {} with {} vendors and {} customers",
+                    eventId, vendorThreads.size(), customerThreads.size());
+
+            return new SimulationStatus(
+                    true,
+                    vendorThreads.size(),
+                    customerThreads.size(),
+                    runningThreads.size()
             );
-            customerThreads.add(customerThread);
-            Thread thread = new Thread(customerThread, "Customer-" + eventId + "-" + i);
-            runningThreads.add(thread);
-            thread.start();
+        } catch (Exception e) {
+            log.error("Error in startSimulation for event {}: {}", eventId, e.getMessage(), e);
+            // Cleanup any partially started resources
+            cleanupFailedStart(eventId);
+            return new SimulationStatus(false, 0, 0, 0);
         }
-
-        activeSimulations.put(eventId, new SimulationContext(
-                config, vendorThreads, customerThreads, runningThreads, false));
-
-        log.info("Started simulation for event {} with {} vendors and {} customers",
-                eventId, config.getVendorCount(), config.getCustomerCount());
-
-        return new SimulationStatus(
-                true,
-                config.getVendorCount(),
-                config.getCustomerCount(),
-                runningThreads.size()
-        );
     }
 
     @Override
@@ -181,7 +218,9 @@ public class SimulationServiceImpl implements SimulationService {
     public Configuration getConfiguration(String eventId) {
         SimulationContext context = activeSimulations.get(eventId);
         if (context == null) {
-            return configRepository.findByEventId(eventId).orElse(null);
+            // Changed from findByEventId().orElse(null) to handle List return type
+            List<Configuration> configs = configRepository.findByEventId(eventId);
+            return configs.isEmpty() ? null : configs.get(0);
         }
         return context.getConfig();
     }
@@ -193,6 +232,7 @@ public class SimulationServiceImpl implements SimulationService {
                 .map(SimulationContext::getConfig)
                 .collect(Collectors.toList());
     }
+
 
     @Override
     public void cleanupSimulations() {
@@ -211,9 +251,13 @@ public class SimulationServiceImpl implements SimulationService {
     @Override
     public SimulationStatus getSimulationStatus(String eventId) {
         SimulationContext context = activeSimulations.get(eventId);
+
+        // Changed to handle List return type
         Configuration config = context != null ?
                 context.getConfig() :
-                configRepository.findByEventId(eventId).orElse(null);
+                configRepository.findByEventId(eventId).stream()
+                        .findFirst()
+                        .orElse(null);
 
         if (config == null) {
             return new SimulationStatus(false, 0, 0, 0);
@@ -225,5 +269,31 @@ public class SimulationServiceImpl implements SimulationService {
                 config.getCustomerCount(),
                 context != null ? context.getRunningThreads().size() : 0
         );
+    }
+
+    private void cleanupFailedStart(String eventId) {
+        try {
+            SimulationContext context = activeSimulations.remove(eventId);
+            if (context != null) {
+                // Stop all threads
+                context.getVendorThreads().forEach(VendorThread::stop);
+                context.getCustomerThreads().forEach(CustomerThread::stop);
+                context.getRunningThreads().forEach(Thread::interrupt);
+            }
+
+            // Cleanup ticket pool
+            ticketPoolService.shutdown(eventId);
+
+            // Updated to handle List return type
+            List<Configuration> configs = configRepository.findByEventId(eventId);
+            if (!configs.isEmpty()) {
+                Configuration config = configs.get(0);
+                config.setRunning(false);
+                config.setPaused(false);
+                configRepository.save(config);
+            }
+        } catch (Exception e) {
+            log.error("Error during cleanup for event {}: {}", eventId, e.getMessage());
+        }
     }
 }

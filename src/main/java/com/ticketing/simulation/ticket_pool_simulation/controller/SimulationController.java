@@ -5,6 +5,7 @@ import com.ticketing.simulation.ticket_pool_simulation.model.entity.Configuratio
 import com.ticketing.simulation.ticket_pool_simulation.service.interfaces.SimulationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -19,22 +20,27 @@ public class SimulationController {
 
     private final SimulationService simulationService;
 
-    @PostMapping("/{eventId}/start")
-    public ResponseEntity<SimulationStatus> startSimulation(@PathVariable String eventId,
-                                                            @RequestBody Configuration config) {
+    @PostMapping(value = "/{eventId}/start", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<SimulationStatus> startSimulation(
+            @PathVariable String eventId,
+            @RequestBody Configuration config) {
         try {
+            log.info("Starting simulation for event: {} with config: {}", eventId, config);
+
+            // Check if simulation is already running
             Configuration currentConfig = simulationService.getConfiguration(eventId);
             if (currentConfig != null && currentConfig.isRunning()) {
-                return ResponseEntity.badRequest()
-                        .body(simulationService.getSimulationStatus(eventId));
+                SimulationStatus currentStatus = simulationService.getSimulationStatus(eventId);
+                log.warn("Simulation already running for event: {}", eventId);
+                return ResponseEntity.ok(currentStatus);
             }
 
-            simulationService.startSimulation(eventId, config);
-            return ResponseEntity.ok(simulationService.getSimulationStatus(eventId));
+            // Start new simulation
+            SimulationStatus status = simulationService.startSimulation(eventId, config);
+            return ResponseEntity.ok(status);
         } catch (Exception e) {
             log.error("Error starting simulation for event: {}", eventId, e);
-            return ResponseEntity.internalServerError()
-                    .body(new SimulationStatus(false, 0, 0, 0));
+            return ResponseEntity.ok(new SimulationStatus(false, 0, 0, 0));
         }
     }
 
@@ -100,12 +106,13 @@ public class SimulationController {
     @GetMapping("/{eventId}/status")
     public ResponseEntity<SimulationStatus> getStatus(@PathVariable String eventId) {
         try {
+            // Always return OK (200) with a status, even if it's the default one
             SimulationStatus status = simulationService.getSimulationStatus(eventId);
             return ResponseEntity.ok(status);
         } catch (Exception e) {
             log.error("Error getting simulation status for event: {}", eventId, e);
-            return ResponseEntity.internalServerError()
-                    .body(new SimulationStatus(false, 0, 0, 0));
+            // Return default status with 200 instead of 500
+            return ResponseEntity.ok(new SimulationStatus(false, 0, 0, 0));
         }
     }
 
