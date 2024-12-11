@@ -12,5 +12,4 @@ public interface EventRepository extends MongoRepository<Event, String> {
     @Query("{ 'eventDate': { $gt: ?0 }, 'totalTickets': { $gt: 0 } }")
     List<Event> findUpcomingEventsWithAvailableTickets(LocalDateTime date);
 
-    List<Event> findByTotalTicketsGreaterThan(int minTickets);
 }

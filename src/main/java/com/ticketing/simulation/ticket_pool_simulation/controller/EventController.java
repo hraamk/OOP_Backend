@@ -67,7 +67,6 @@ public class EventController {
 
             event.setName(eventDetails.getName());
             event.setDescription(eventDetails.getDescription());
-            event.setTotalTickets(eventDetails.getTotalTickets());
             event.setPrice(eventDetails.getPrice());
             event.setEventDate(eventDetails.getEventDate());
 

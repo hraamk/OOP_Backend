@@ -15,6 +15,7 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -453,6 +454,12 @@ public class SimulationServiceImpl implements SimulationService {
     public void cleanup() {
         cleanupSimulations();
         ticketPoolService.shutdown();  // Add global shutdown call
+    }
+
+    @EventListener
+    public void handleSimulationStopEvent(SimulationStopEvent event) {
+        log.info("Received simulation stop event for event ID: {}", event.getEventId());
+        stopSimulation(event.getEventId());
     }
 
 }

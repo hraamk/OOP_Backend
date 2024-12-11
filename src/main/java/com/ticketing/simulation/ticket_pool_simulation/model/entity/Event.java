@@ -19,7 +19,6 @@ public class Event {
     private String id;
     private String name;
     private String description;
-    private int totalTickets;
     private double price;
     private LocalDateTime eventDate;
 }

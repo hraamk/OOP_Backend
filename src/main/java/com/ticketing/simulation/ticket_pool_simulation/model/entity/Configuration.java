@@ -18,6 +18,7 @@ public class Configuration {
     private String eventId;  // Reference to associated event
     private String templateName;
     private int vendorCount;
+    private int totalTickets;
     private int customerCount;
     private int ticketReleaseRate;
     private int customerRetrievalRate;

@@ -4,6 +4,7 @@ import com.ticketing.simulation.ticket_pool_simulation.model.dto.TicketPoolUpdat
 import com.ticketing.simulation.ticket_pool_simulation.model.entity.Configuration;
 import com.ticketing.simulation.ticket_pool_simulation.model.entity.Ticket;
 import com.ticketing.simulation.ticket_pool_simulation.repository.TicketRepository;
+import com.ticketing.simulation.ticket_pool_simulation.service.interfaces.SimulationService;
 import com.ticketing.simulation.ticket_pool_simulation.service.interfaces.TicketPoolService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -14,6 +15,7 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -28,6 +30,9 @@ public class TicketPoolServiceImpl implements TicketPoolService {
     private final Map<String, AtomicBoolean> runningStatus = new ConcurrentHashMap<>();
     private final ScheduledExecutorService updateExecutor = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, Long> lastUpdateTime = new ConcurrentHashMap<>();
+    private final Map<String, AtomicInteger> totalTicketsCreated = new ConcurrentHashMap<>();
+    private final Map<String, Integer> ticketLimits = new ConcurrentHashMap<>();
+    private final SimulationEventHandlerService eventHandlerService;
 
     private static final int BATCH_SIZE = 10;
     private static final int QUEUE_TIMEOUT_MS = 100;
@@ -55,12 +60,14 @@ public class TicketPoolServiceImpl implements TicketPoolService {
     @Override
     public void initialize(String eventId, Configuration config) {
         synchronized(getLock(eventId)) {
-            log.info("Initializing ticket pool for event {} with capacity {}",
-                    eventId, config.getMaxTicketCapacity());
+            log.info("Initializing ticket pool for event {} with capacity {} and total ticket limit {}",
+                    eventId, config.getMaxTicketCapacity(), config.getTotalTickets());
 
             ticketPools.put(eventId, new LinkedBlockingQueue<>(config.getMaxTicketCapacity()));
             configs.put(eventId, config);
             runningStatus.put(eventId, new AtomicBoolean(true));
+            totalTicketsCreated.put(eventId, new AtomicInteger(0));
+            ticketLimits.put(eventId, config.getTotalTickets());
 
             schedulePoolUpdate(eventId);
         }
@@ -175,6 +182,8 @@ public class TicketPoolServiceImpl implements TicketPoolService {
         BlockingQueue<Ticket> ticketPool = ticketPools.remove(eventId);
         configs.remove(eventId);
         runningStatus.remove(eventId);
+        totalTicketsCreated.remove(eventId);
+        ticketLimits.remove(eventId);
 
         if (ticketPool != null) {
             int remainingTickets = ticketPool.size();
@@ -276,6 +285,15 @@ public class TicketPoolServiceImpl implements TicketPoolService {
             if (!added) {
                 log.warn("Failed to add all tickets to pool for event {}", eventId);
             } else {
+                // Update total tickets created and check limit
+                int newTotal = totalTicketsCreated.get(eventId).addAndGet(savedTickets.size());
+                Integer limit = ticketLimits.get(eventId);
+
+                if (limit != null && newTotal >= limit) {
+                    log.info("Total tickets limit reached for event {}. Triggering simulation stop.", eventId);
+                    eventHandlerService.publishSimulationStopEvent(eventId);
+                }
+
                 // Send update after successful batch addition
                 sendPoolUpdate(eventId);
             }
