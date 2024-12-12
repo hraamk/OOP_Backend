@@ -1,5 +1,6 @@
 package com.ticketing.simulation.ticket_pool_simulation.service.impl;
 
+import com.mongodb.MongoInterruptedException;
 import com.ticketing.simulation.ticket_pool_simulation.model.dto.TicketPoolUpdate;
 import com.ticketing.simulation.ticket_pool_simulation.model.entity.Configuration;
 import com.ticketing.simulation.ticket_pool_simulation.model.entity.Ticket;
@@ -10,6 +11,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -33,6 +35,13 @@ public class TicketPoolServiceImpl implements TicketPoolService {
     private final Map<String, AtomicInteger> totalTicketsCreated = new ConcurrentHashMap<>();
     private final Map<String, Integer> ticketLimits = new ConcurrentHashMap<>();
     private final SimulationEventHandlerService eventHandlerService;
+    private final Map<String, AtomicInteger> shutdownPhase = new ConcurrentHashMap<>();
+    private static final int NOT_SHUTTING_DOWN = 0;
+    private static final int SHUTDOWN_INITIATED = 1;
+    private static final int SHUTDOWN_COMPLETED = 2;
+
+
+
 
     private static final int BATCH_SIZE = 10;
     private static final int QUEUE_TIMEOUT_MS = 100;
@@ -68,6 +77,7 @@ public class TicketPoolServiceImpl implements TicketPoolService {
             runningStatus.put(eventId, new AtomicBoolean(true));
             totalTicketsCreated.put(eventId, new AtomicInteger(0));
             ticketLimits.put(eventId, config.getTotalTickets());
+            shutdownPhase.put(eventId, new AtomicInteger(NOT_SHUTTING_DOWN));
 
             schedulePoolUpdate(eventId);
         }
@@ -176,23 +186,86 @@ public class TicketPoolServiceImpl implements TicketPoolService {
 
     @Override
     public void shutdownEvent(String eventId) {
-        log.info("Shutting down ticket pool for event {}", eventId);
+        AtomicInteger phase = shutdownPhase.computeIfAbsent(eventId, k -> new AtomicInteger(NOT_SHUTTING_DOWN));
 
-        // Remove event-specific resources
-        BlockingQueue<Ticket> ticketPool = ticketPools.remove(eventId);
+        // Only proceed if we haven't started shutdown yet
+        if (!phase.compareAndSet(NOT_SHUTTING_DOWN, SHUTDOWN_INITIATED)) {
+            return;
+        }
+
+        try {
+            log.info("Shutting down event {}", eventId);
+
+            // Mark as not running first
+            runningStatus.computeIfPresent(eventId, (id, status) -> {
+                status.set(false);
+                return status;
+            });
+
+            // Brief pause to allow in-progress operations to complete
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+
+            // Complete shutdown
+            phase.set(SHUTDOWN_COMPLETED);
+
+            // Clean up resources
+            cleanupResources(eventId);
+        } catch (Exception e) {
+            log.error("Error during shutdown for event {}", eventId, e);
+            // Ensure cleanup happens even if there's an error
+            cleanupResources(eventId);
+        }
+    }
+
+    private void cleanupResources(String eventId) {
+        ticketPools.remove(eventId);
         configs.remove(eventId);
         runningStatus.remove(eventId);
         totalTicketsCreated.remove(eventId);
         ticketLimits.remove(eventId);
+        shutdownPhase.remove(eventId);
 
-        if (ticketPool != null) {
-            int remainingTickets = ticketPool.size();
-            ticketPool.clear();
-            log.info("Cleared ticket pool for event {}. Removed {} remaining tickets",
-                    eventId, remainingTickets);
-
-            // Send final update before shutdown
+        try {
+            // Final update before complete cleanup
             sendPoolUpdate(eventId);
+        } catch (Exception e) {
+            log.warn("Error sending final update for event {}", eventId, e);
+        }
+    }
+
+
+
+    private <T> T retryOperation(Supplier<T> operation) {
+        int retries = 0;
+        while (true) {
+            try {
+                return operation.get();
+            } catch (Exception e) {
+                // Check for interruption first
+                if (e instanceof MongoInterruptedException || Thread.currentThread().isInterrupted()) {
+                    log.debug("Operation interrupted, will not retry");
+                    throw e;
+                }
+
+                retries++;
+                if (retries >= DB_RETRY_COUNT) {
+                    log.error("Operation failed after {} retries", DB_RETRY_COUNT);
+                    throw e;
+                }
+
+                log.warn("Operation failed, attempt {}/{}. Retrying after delay...",
+                        retries, DB_RETRY_COUNT);
+                try {
+                    Thread.sleep(DB_RETRY_DELAY_MS * retries);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted during retry", ie);
+                }
+            }
         }
     }
 
@@ -276,57 +349,133 @@ public class TicketPoolServiceImpl implements TicketPoolService {
     }
 
     private boolean processBatch(List<Ticket> batch, BlockingQueue<Ticket> ticketPool, String eventId) {
+        // Check shutdown status at the very beginning
+        AtomicInteger phase = shutdownPhase.get(eventId);
+        if (phase != null && phase.get() != NOT_SHUTTING_DOWN) {
+            log.debug("Skipping batch processing as event {} is shutting down", eventId);
+            return false;
+        }
+
         try {
-            log.debug("Saving batch of {} tickets to database for event {}", batch.size(), eventId);
-            List<Ticket> savedTickets = retryOperation(() -> ticketRepository.saveAll(batch));
-            log.debug("Successfully saved {} tickets to database", savedTickets.size());
+            // Check ticket limit first
+            AtomicInteger totalCreated = totalTicketsCreated.get(eventId);
+            Integer limit = ticketLimits.get(eventId);
 
-            boolean added = addTicketsToPool(savedTickets, ticketPool, eventId);
-            if (!added) {
-                log.warn("Failed to add all tickets to pool for event {}", eventId);
-            } else {
-                // Update total tickets created and check limit
-                int newTotal = totalTicketsCreated.get(eventId).addAndGet(savedTickets.size());
-                Integer limit = ticketLimits.get(eventId);
-
-                if (limit != null && newTotal >= limit) {
-                    log.info("Total tickets limit reached for event {}. Triggering simulation stop.", eventId);
-                    eventHandlerService.publishSimulationStopEvent(eventId);
+            if (totalCreated != null && limit != null) {
+                int currentTotal = totalCreated.get();
+                if (currentTotal >= limit) {
+                    log.info("Total tickets limit {} reached for event {}. Current total: {}",
+                            limit, eventId, currentTotal);
+                    safelyStopSimulation(eventId);
+                    return false;
                 }
-
-                // Send update after successful batch addition
-                sendPoolUpdate(eventId);
             }
-            return added;
+
+            // Recheck shutdown status before MongoDB operation
+            if (!isRunning(eventId)) {
+                return false;
+            }
+
+            List<Ticket> savedTickets = saveTicketsBatch(batch);
+            if (savedTickets.isEmpty()) {
+                return false;
+            }
+
+            // Update totals
+            if (totalCreated != null) {
+                int newTotal = totalCreated.addAndGet(savedTickets.size());
+                if (limit != null && newTotal >= limit) {
+                    log.info("Total tickets limit {} reached for event {}. Final total: {}",
+                            limit, eventId, newTotal);
+                    safelyStopSimulation(eventId);
+                    return addTicketsToPool(savedTickets, ticketPool, eventId);
+                }
+            }
+
+            return addTicketsToPool(savedTickets, ticketPool, eventId);
         } catch (Exception e) {
-            log.error("Failed to process ticket batch for event {}: {}", eventId, e.getMessage(), e);
+            if (!isRunning(eventId)) {
+                log.debug("Ignoring batch processing error as event {} is shutting down", eventId);
+                return false;
+            }
+            log.error("Error processing batch for event {}: {}", eventId, e.getMessage());
             return false;
         }
     }
 
-    private boolean addTicketsToPool(List<Ticket> tickets, BlockingQueue<Ticket> ticketPool, String eventId) {
-        log.debug("Adding {} tickets to pool for event {}", tickets.size(), eventId);
-        int addedCount = 0;
 
-        for (Ticket ticket : tickets) {
+    private void safelyStopSimulation(String eventId) {
+        AtomicInteger phase = shutdownPhase.computeIfAbsent(eventId, k -> new AtomicInteger(NOT_SHUTTING_DOWN));
+        if (!phase.compareAndSet(NOT_SHUTTING_DOWN, SHUTDOWN_INITIATED)) {
+            return;
+        }
+
+        try {
+            log.info("Initiating safe shutdown for event {}", eventId);
+
+            // First mark as not running to prevent new operations
+            runningStatus.computeIfPresent(eventId, (id, status) -> {
+                status.set(false);
+                return status;
+            });
+
+            // Set shutdown phase to completed before any MongoDB operations
+            phase.set(SHUTDOWN_COMPLETED);
+
+            // Allow time for in-progress operations to complete
             try {
-                if (!ticketPool.offer(ticket, QUEUE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                    log.warn("Queue offer timeout for event: {}. Added {}/{} tickets",
-                            eventId, addedCount, tickets.size());
-                    return false;
-                }
-                addedCount++;
+                Thread.sleep(200);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.warn("Interrupted while adding tickets to pool. Added {}/{} tickets",
-                        addedCount, tickets.size());
-                return false;
+            }
+
+            // Now publish the stop event without any MongoDB operations
+            CompletableFuture.runAsync(() -> {
+                try {
+                    eventHandlerService.publishSimulationStopEvent(eventId);
+                } catch (Exception e) {
+                    // Just log the error but don't rethrow - allow shutdown to continue
+                    log.error("Error publishing stop event for event {}", eventId, e);
+                }
+            });
+
+        } catch (Exception e) {
+            log.error("Error during safe shutdown for event {}", eventId, e);
+            // Don't reset shutdown status - continue with shutdown even if there was an error
+        }
+    }
+
+
+    private boolean addTicketsToPool(List<Ticket> tickets, BlockingQueue<Ticket> ticketPool, String eventId) {
+        AtomicInteger phase = shutdownPhase.get(eventId);
+        if (phase != null && phase.get() != NOT_SHUTTING_DOWN) {
+            return false;
+        }
+
+        int addedCount = 0;
+        for (Ticket ticket : tickets) {
+            if (phase != null && phase.get() != NOT_SHUTTING_DOWN) {
+                break;
+            }
+
+            try {
+                if (ticketPool.offer(ticket, QUEUE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                    addedCount++;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
             }
         }
 
-        log.debug("Successfully added all {} tickets to pool", tickets.size());
-        return true;
+        // Send update if any tickets were added
+        if (addedCount > 0) {
+            sendPoolUpdate(eventId);
+        }
+
+        return addedCount == tickets.size();
     }
+
 
     private Ticket processPurchase(Ticket ticket, String customerId, BlockingQueue<Ticket> ticketPool) {
         try {
@@ -351,35 +500,11 @@ public class TicketPoolServiceImpl implements TicketPoolService {
         }
     }
 
-    private <T> T retryOperation(Supplier<T> operation) {
-        for (int i = 0; i < DB_RETRY_COUNT; i++) {
-            try {
-                return operation.get();
-            } catch (Exception e) {
-                if (i == DB_RETRY_COUNT - 1) {
-                    log.error("Operation failed after {} retries", DB_RETRY_COUNT);
-                    throw e;
-                }
-                log.warn("Operation failed, attempt {}/{}. Retrying after delay...",
-                        i + 1, DB_RETRY_COUNT);
-                try {
-                    Thread.sleep(DB_RETRY_DELAY_MS * (i + 1));
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted during retry", ie);
-                }
-            }
-        }
-        throw new RuntimeException("Failed after " + DB_RETRY_COUNT + " retries");
-    }
-
     private void validateEventState(String eventId) {
-        AtomicBoolean status = runningStatus.get(eventId);
-        if (status == null || !status.get()) {
-            log.error("Attempted to access inactive ticket pool for event {}", eventId);
+        if (!isRunning(eventId)) {
+            log.debug("Ticket pool is not running for event: {}", eventId);
             throw new IllegalStateException("Ticket pool is not running for event: " + eventId);
         }
-        log.trace("Validated event state for {}", eventId);
     }
 
     private BlockingQueue<Ticket> getTicketPool(String eventId) {
@@ -403,11 +528,12 @@ public class TicketPoolServiceImpl implements TicketPoolService {
     }
 
     private boolean isRunning(String eventId) {
+        AtomicInteger phase = shutdownPhase.get(eventId);
         AtomicBoolean status = runningStatus.get(eventId);
-        boolean running = status != null && status.get();
-        log.trace("Checked running status for event {}: {}", eventId, running);
-        return running;
+        return status != null && status.get() &&
+                phase != null && phase.get() == NOT_SHUTTING_DOWN;
     }
+
 
     private int getAvailableCapacity(BlockingQueue<Ticket> ticketPool, Configuration config) {
         int capacity = config.getMaxTicketCapacity() - ticketPool.size();
@@ -415,4 +541,15 @@ public class TicketPoolServiceImpl implements TicketPoolService {
                 capacity, config.getMaxTicketCapacity(), ticketPool.size());
         return capacity;
     }
+    @Transactional
+    private List<Ticket> saveTicketsBatch(List<Ticket> batch) {
+        try {
+            return ticketRepository.saveAll(batch);
+        } catch (Exception e) {
+            log.error("Error saving ticket batch: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+
 }
